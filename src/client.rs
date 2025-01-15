@@ -1,7 +1,15 @@
+use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
 use std::net::TcpStream;
 use std::thread;
 use std::env;
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ChatMessage {
+    message_type: String,       // "message", "join", or "leave"
+    username: Option<String>,   // Username of the sender (None for join/leave notifications)
+    content: String,            // The actual message or notification content
+}
 
 fn main() -> std::io::Result<()> {
     // Read the port from command-line arguments
@@ -31,9 +39,30 @@ fn main() -> std::io::Result<()> {
         for line in reader.lines() {
             match line {
                 Ok(msg) => {
-                    // Directly print the message as it comes from the server
-                    print!("\r{}\n[You]: ", msg);
-                    io::stdout().flush().unwrap(); // Ensure prompt is displayed properly
+                    // Trim the incoming message to remove newlines or extra spaces
+                    let trimmed_msg = msg.trim();
+
+                    // Deserialize the incoming JSON message
+                    let chat_msg: Result<ChatMessage, _> = serde_json::from_str(trimmed_msg);
+                    match chat_msg {
+                        Ok(chat_msg) => match chat_msg.message_type.as_str() {
+                            "message" => {
+                                if let Some(username) = chat_msg.username {
+                                    println!("\r[{}]: {}", username, chat_msg.content);
+                                }
+                            }
+                            "join" | "leave" => {
+                                println!("\r{}", chat_msg.content);
+                            }
+                            _ => println!("\rUnknown message type: {}", chat_msg.message_type),
+                        },
+                        Err(e) => {
+                            println!("\rFailed to parse message: {}. Raw message: {}", e, trimmed_msg);
+                        }
+                    }
+                    // Reprint the `[You]:` prompt after processing the message
+                    print!("[You]: ");
+                    io::stdout().flush().unwrap();
                 }
                 Err(e) => {
                     println!("Error reading message: {}", e);
@@ -51,16 +80,27 @@ fn main() -> std::io::Result<()> {
         let msg = line?;
         if msg == "/quit" {
             // Send a disconnect message to the server and break the loop
-            stream.write_all(format!("{} has left the chat\n", username).as_bytes())?;
+            let leave_msg = ChatMessage {
+                message_type: "leave".to_string(),
+                username: Some(username.clone()),
+                content: format!("{} has left the chat", username),
+            };
+            let serialized_msg = serde_json::to_string(&leave_msg).unwrap();
+            stream.write_all(format!("{}\n", serialized_msg).as_bytes())?;
             println!("You have disconnected from the chat.");
             break;
         }
-        // Send the message to the server
-        stream.write_all(format!("{}\n", msg).as_bytes())?;
+        // Create and send the chat message as JSON
+        let chat_msg = ChatMessage {
+            message_type: "message".to_string(),
+            username: Some(username.clone()),
+            content: msg.clone(),
+        };
+        let serialized_msg = serde_json::to_string(&chat_msg).unwrap();
+        stream.write_all(format!("{}\n", serialized_msg).as_bytes())?;
 
         // Display your own message locally without extra newline
-        print!("\r[You]: {}", msg);
-        print!("\n[You]: ");
+        print!("\r[You]: {}\n[You]: ", msg);
         io::stdout().flush().unwrap(); // Flush to display the prompt after each input
     }
 

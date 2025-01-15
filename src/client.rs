@@ -1,14 +1,14 @@
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::io::{self, BufRead, Write};
 use std::net::TcpStream;
 use std::thread;
-use std::env;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ChatMessage {
-    message_type: String,       // "message", "join", or "leave"
-    username: Option<String>,   // Username of the sender (None for join/leave notifications)
-    content: String,            // The actual message or notification content
+    message_type: String,     // "message", "join", or "leave"
+    username: Option<String>, // Username of the sender (None for join/leave notifications)
+    content: String,          // The actual message or notification content
 }
 
 fn main() -> std::io::Result<()> {
@@ -57,7 +57,10 @@ fn main() -> std::io::Result<()> {
                             _ => println!("\rUnknown message type: {}", chat_msg.message_type),
                         },
                         Err(e) => {
-                            println!("\rFailed to parse message: {}. Raw message: {}", e, trimmed_msg);
+                            println!(
+                                "\rFailed to parse message: {}. Raw message: {}",
+                                e, trimmed_msg
+                            );
                         }
                     }
                     // Reprint the `[You]:` prompt after processing the message

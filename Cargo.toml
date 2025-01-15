@@ -1,0 +1,14 @@
+[package]
+name = "rust-tcp-chat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[[bin]]
+name = "chat-server"
+path = "src/server.rs"
+
+[[bin]]
+name = "chat-client"
+path = "src/client.rs"

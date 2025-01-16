@@ -51,7 +51,9 @@ fn main() -> std::io::Result<()> {
                                     println!("\r[{}]: {}", username, chat_msg.content);
                                 }
                             }
-                            "join" | "leave" => {
+                            "join" | "leave" | "list" => {
+                                // Print out the content directly, e.g. “Bob has joined”, “Bob has left”,
+                                // or “Online users: Alice, Bob, Charlie”
                                 println!("\r{}", chat_msg.content);
                             }
                             _ => println!("\rUnknown message type: {}", chat_msg.message_type),
@@ -81,6 +83,13 @@ fn main() -> std::io::Result<()> {
     io::stdout().flush().unwrap(); // Ensure the prompt is displayed immediately
     for line in stdin.lock().lines() {
         let msg = line?;
+
+        if msg == "/list" {
+            // Send the "/list" command to the server
+            stream.write_all(format!("{}\n", msg).as_bytes())?;
+            continue; // Skip local echoing
+        }
+
         if msg == "/quit" {
             // Send a disconnect message to the server and break the loop
             let leave_msg = ChatMessage {

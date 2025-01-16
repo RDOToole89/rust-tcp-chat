@@ -2,25 +2,26 @@
 // We'll use the `serde` crate for serializing and deserializing JSON.
 
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream, SocketAddr};
-use std::thread;
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 // Define the message structure for communication between clients and the server
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct ChatMessage {
-    message_type: String, // "message", "join", or "leave"
+    message_type: String,     // "message", "join", or "leave"
     username: Option<String>, // Username of the sender (None for join/leave notifications)
-    content: String         // The actual message or notification content
+    content: String,          // The actual message or notification content
 }
 
 // Function to handle communication with a connected client
 fn handle_client(
     mut stream: TcpStream, // Stream for communicating with the client
     clients: Arc<Mutex<HashMap<SocketAddr, TcpStream>>>, // Shared list of clients
-    usernames: Arc<Mutex<HashMap<SocketAddr, String>>> // Shared map of usernames
+    usernames: Arc<Mutex<HashMap<SocketAddr, String>>>, // Shared map of usernames
+    chat_history: Arc<Mutex<Vec<ChatMessage>>>, // Shared vector for message history
 ) {
     let peer_addr = stream.peer_addr().unwrap(); // Get the client's address
     println!("Started handling client: {:?}", peer_addr);
@@ -32,8 +33,22 @@ fn handle_client(
         Ok(n) if n > 0 => {
             // Extract the username from the buffer
             let username = String::from_utf8_lossy(&buffer[..n]).trim().to_string();
-            usernames.lock().unwrap().insert(peer_addr, username.clone()); // Save the username
+            usernames
+                .lock()
+                .unwrap()
+                .insert(peer_addr, username.clone()); // Save the username
             println!("Username for {:?} is {}", peer_addr, username);
+
+            {
+                let history = chat_history.lock().unwrap();
+                for old_msg in history.iter() {
+                    // Serialize each old message and send it to the new client
+                    let serialized = serde_json::to_string(old_msg).unwrap();
+                    if let Err(e) = stream.write_all(format!("{}\n", serialized).as_bytes()) {
+                        println!("[ERROR] Failed to send history to {:?}: {}", peer_addr, e);
+                    }
+                }
+            }
 
             // Notify all clients that a new user has joined
             let join_msg = ChatMessage {
@@ -41,6 +56,10 @@ fn handle_client(
                 username: Some(username.clone()),
                 content: format!("{} has entered the chat", username),
             };
+
+            // Also store that "join" event in history if you want.
+            chat_history.lock().unwrap().push(join_msg.clone());
+
             broadcast_message(&clients, &peer_addr, &join_msg);
         }
         _ => {
@@ -51,7 +70,8 @@ fn handle_client(
 
     // Step 2: Handle messages from the client in a loop
     loop {
-        match stream.read(&mut buffer) { // stream.read() returns the number of bytes read
+        match stream.read(&mut buffer) {
+            // stream.read() returns the number of bytes read
             Ok(0) => {
                 // Client has disconnected
                 println!("Client disconnected: {:?}", peer_addr);
@@ -61,7 +81,7 @@ fn handle_client(
                 // Successfully read `n` bytes
                 let raw_msg = String::from_utf8_lossy(&buffer[..n]).trim().to_string();
                 println!("[DEBUG] raw_msg = {}", raw_msg);
-        
+
                 // Step 2a: Deserialize the incoming JSON message
                 let incoming_msg: Result<ChatMessage, _> = serde_json::from_str(&raw_msg);
                 match incoming_msg {
@@ -74,23 +94,38 @@ fn handle_client(
                             .map(|s| s.clone())
                             .unwrap_or_else(|| "Unknown".to_string());
                         println!("[DEBUG] Parsed message: {:?}", parsed_msg);
-        
+
                         match parsed_msg.message_type.as_str() {
                             "message" => {
-                                println!("[DEBUG] Sender: {}, Content: {}", sender_username, parsed_msg.content);
+                                println!(
+                                    "[DEBUG] Sender: {}, Content: {}",
+                                    sender_username, parsed_msg.content
+                                );
                                 let chat_msg = ChatMessage {
                                     message_type: "message".to_string(),
                                     username: Some(sender_username),
                                     content: parsed_msg.content,
                                 };
+
+                                // Also store that "message" event in history if you want.
+                                chat_history.lock().unwrap().push(chat_msg.clone());
+
                                 broadcast_message(&clients, &peer_addr, &chat_msg);
                             }
-                            "join" | "leave" => println!("[DEBUG] Notification: {}", parsed_msg.content),
-                            _ => println!("[DEBUG] Unknown message type: {}", parsed_msg.message_type),
+                            "join" | "leave" => {
+                                println!("[DEBUG] Notification: {}", parsed_msg.content)
+                            }
+                            _ => println!(
+                                "[DEBUG] Unknown message type: {}",
+                                parsed_msg.message_type
+                            ),
                         }
                     }
                     Err(e) => {
-                        println!("[DEBUG] Failed to parse message from {:?}: {}", peer_addr, e);
+                        println!(
+                            "[DEBUG] Failed to parse message from {:?}: {}",
+                            peer_addr, e
+                        );
                     }
                 }
             }
@@ -105,8 +140,18 @@ fn handle_client(
     // Step 3: Notify all clients that the user has left
     let leave_msg = ChatMessage {
         message_type: "leave".to_string(),
-        username: Some(usernames.lock().unwrap().get(&peer_addr).unwrap().to_string()),
-        content: format!("{} has left the chat", usernames.lock().unwrap().get(&peer_addr).unwrap()),
+        username: Some(
+            usernames
+                .lock()
+                .unwrap()
+                .get(&peer_addr)
+                .unwrap()
+                .to_string(),
+        ),
+        content: format!(
+            "{} has left the chat",
+            usernames.lock().unwrap().get(&peer_addr).unwrap()
+        ),
     };
     broadcast_message(&clients, &peer_addr, &leave_msg);
 
@@ -119,8 +164,8 @@ fn handle_client(
 // Function to broadcast a message to all connected clients, except the sender
 fn broadcast_message(
     clients: &Arc<Mutex<HashMap<SocketAddr, TcpStream>>>, // Shared list of clients
-    sender: &SocketAddr, // Address of the sender
-    message: &ChatMessage // The message to broadcast
+    sender: &SocketAddr,                                  // Address of the sender
+    message: &ChatMessage,                                // The message to broadcast
 ) {
     let serialized_msg = serde_json::to_string(message).unwrap(); // Serialize the message to JSON
     let mut clients = clients.lock().unwrap();
@@ -152,6 +197,8 @@ fn main() -> std::io::Result<()> {
     let clients = Arc::new(Mutex::new(HashMap::new()));
     let usernames = Arc::new(Mutex::new(HashMap::new()));
 
+    let chat_history = Arc::new(Mutex::new(Vec::new()));
+
     // Accept incoming client connections
     for stream in listener.incoming() {
         match stream {
@@ -161,10 +208,14 @@ fn main() -> std::io::Result<()> {
 
                 let clients = Arc::clone(&clients);
                 let usernames = Arc::clone(&usernames);
-                clients.lock().unwrap().insert(peer_addr, stream.try_clone().unwrap());
+                clients
+                    .lock()
+                    .unwrap()
+                    .insert(peer_addr, stream.try_clone().unwrap());
+                let chat_history = Arc::clone(&chat_history);
 
                 // Spawn a new thread to handle the client
-                thread::spawn(move || handle_client(stream, clients, usernames));
+                thread::spawn(move || handle_client(stream, clients, usernames, chat_history));
             }
             Err(e) => {
                 println!("Failed to accept connection: {}", e);

@@ -1,119 +1,112 @@
+// src/client.rs
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::{self, BufRead, Write};
 use std::net::TcpStream;
 use std::thread;
 
+/// A message structure matching what the server expects
 #[derive(Serialize, Deserialize, Debug)]
 struct ChatMessage {
-    message_type: String,     // "message", "join", or "leave"
-    username: Option<String>, // Username of the sender (None for join/leave notifications)
-    content: String,          // The actual message or notification content
+    message_type: String,
+    username: Option<String>,
+    content: String,
 }
 
 fn main() -> std::io::Result<()> {
-    // Read the port from command-line arguments
+    // Read port from CLI arguments or default to 8081
     let args: Vec<String> = env::args().collect();
     let port = if args.len() > 1 { &args[1] } else { "8081" };
 
-    // Connect to the server
+    // Connect to server
     let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))?;
     println!("Connected to the server!");
 
-    // Prompt the user for a username
-    let mut username = String::new();
+    // Prompt user for a username
     print!("Enter your username: ");
     io::stdout().flush().unwrap();
+    let mut username = String::new();
     io::stdin().read_line(&mut username)?;
-    username = username.trim().to_string(); // Remove newline characters
+    let username = username.trim().to_string();
 
-    // Send the username to the server
+    // Send that username to server
     stream.write_all(format!("{}\n", username).as_bytes())?;
 
-    // Clone the stream to read messages from the server
+    // Clone the stream so we can read in a separate thread
     let stream_clone = stream.try_clone()?;
 
-    // Spawn a thread to handle incoming messages from the server
+    // Spawn a thread for incoming messages
     thread::spawn(move || {
         let reader = io::BufReader::new(stream_clone);
         for line in reader.lines() {
             match line {
-                Ok(msg) => {
-                    // Trim the incoming message to remove newlines or extra spaces
-                    let trimmed_msg = msg.trim();
-
-                    // Deserialize the incoming JSON message
-                    let chat_msg: Result<ChatMessage, _> = serde_json::from_str(trimmed_msg);
-                    match chat_msg {
-                        Ok(chat_msg) => match chat_msg.message_type.as_str() {
+                Ok(raw) => {
+                    let trimmed = raw.trim();
+                    match serde_json::from_str::<ChatMessage>(trimmed) {
+                        Ok(msg) => match msg.message_type.as_str() {
                             "message" => {
-                                if let Some(username) = chat_msg.username {
-                                    println!("\r[{}]: {}", username, chat_msg.content);
+                                if let Some(u) = msg.username {
+                                    println!("\r[{}]: {}", u, msg.content);
                                 }
                             }
                             "join" | "leave" | "list" => {
-                                // Print out the content directly, e.g. “Bob has joined”, “Bob has left”,
-                                // or “Online users: Alice, Bob, Charlie”
-                                println!("\r{}", chat_msg.content);
+                                println!("\r{}", msg.content);
                             }
-                            _ => println!("\rUnknown message type: {}", chat_msg.message_type),
+                            other => {
+                                println!("\rUnknown message type: {}", other);
+                            }
                         },
                         Err(e) => {
-                            println!(
-                                "\rFailed to parse message: {}. Raw message: {}",
-                                e, trimmed_msg
-                            );
+                            eprintln!("\rFailed to parse JSON: {} (raw = {})", e, trimmed);
                         }
                     }
-                    // Reprint the `[You]:` prompt after processing the message
+                    // Reprompt
                     print!("[You]: ");
                     io::stdout().flush().unwrap();
                 }
                 Err(e) => {
-                    println!("Error reading message: {}", e);
+                    eprintln!("Error reading server message: {}", e);
                     break;
                 }
             }
         }
     });
 
-    // Main thread handles sending messages to the server
+    // Main loop: read from stdin and send
     let stdin = io::stdin();
     print!("[You]: ");
-    io::stdout().flush().unwrap(); // Ensure the prompt is displayed immediately
+    io::stdout().flush().unwrap();
     for line in stdin.lock().lines() {
-        let msg = line?;
-
-        if msg == "/list" {
-            // Send the "/list" command to the server
-            stream.write_all(format!("{}\n", msg).as_bytes())?;
-            continue; // Skip local echoing
+        let input = line?;
+        // Check for commands
+        if input == "/list" {
+            stream.write_all(format!("{}\n", input).as_bytes())?;
+            continue;
         }
-
-        if msg == "/quit" {
-            // Send a disconnect message to the server and break the loop
-            let leave_msg = ChatMessage {
+        if input == "/quit" {
+            let leave = ChatMessage {
                 message_type: "leave".to_string(),
                 username: Some(username.clone()),
                 content: format!("{} has left the chat", username),
             };
-            let serialized_msg = serde_json::to_string(&leave_msg).unwrap();
-            stream.write_all(format!("{}\n", serialized_msg).as_bytes())?;
-            println!("You have disconnected from the chat.");
+            let serialized = serde_json::to_string(&leave).unwrap();
+            stream.write_all(format!("{}\n", serialized).as_bytes())?;
+            println!("You have disconnected.");
             break;
         }
-        // Create and send the chat message as JSON
+
+        // Otherwise, a normal chat message
         let chat_msg = ChatMessage {
             message_type: "message".to_string(),
             username: Some(username.clone()),
-            content: msg.clone(),
+            content: input.clone(),
         };
-        let serialized_msg = serde_json::to_string(&chat_msg).unwrap();
-        stream.write_all(format!("{}\n", serialized_msg).as_bytes())?;
+        let serialized = serde_json::to_string(&chat_msg).unwrap();
+        stream.write_all(format!("{}\n", serialized).as_bytes())?;
 
-        // Display your own message locally without extra newline
-        print!("\r[You]: {}\n[You]: ", msg);
-        io::stdout().flush().unwrap(); // Flush to display the prompt after each input
+        // Print local echo
+        print!("\r[You]: {}\n[You]: ", input);
+        io::stdout().flush().unwrap();
     }
 
     Ok(())

@@ -1,3 +1,4 @@
+# Cargo.toml
 [package]
 name = "rust-tcp-chat"
 version = "0.1.0"
@@ -7,7 +8,9 @@ edition = "2021"
 serde = { version = "1.0.197", features = ["derive"] }
 serde_json = "1.0.114"
 dashmap = "5.1.0"
-
+thiserror = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+log = "0.4"
 [[bin]]
 name = "chat-server"
 path = "src/server.rs"

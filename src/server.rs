@@ -1,48 +1,74 @@
 mod client_handler;
-mod message; // Import the message module // Import the client handler module
+mod errors;
+mod message;
 
-use client_handler::handle_client; // Import the handle_client function
-use dashmap::DashMap;
-use std::net::TcpListener;
-use std::sync::{Arc, RwLock};
-use std::thread; // Import the ChatMessage struct
+use std::collections::HashMap;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
-fn main() -> std::io::Result<()> {
+use client_handler::handle_client;
+use errors::ChatResult; // <--- Only ChatResult used here
+use message::ChatMessage; // <--- Our shared ChatMessage struct
+
+fn main() -> ChatResult<()> {
     let mut port = 8081;
+    // Try binding to 127.0.0.1:port, increment if in use
     let listener = loop {
         match TcpListener::bind(format!("127.0.0.1:{}", port)) {
-            Ok(listener) => {
+            Ok(lst) => {
                 println!("Server listening on 127.0.0.1:{}", port);
-                break listener;
+                break lst;
             }
             Err(_) => {
-                println!("Port {} is in use, trying port {}", port, port + 1);
+                println!("Port {} in use. Trying {}", port, port + 1);
                 port += 1;
             }
         }
     };
 
-    // Shared state for the server
-    let clients = Arc::new(DashMap::new()); // Thread-safe map of client addresses to streams
-    let usernames = Arc::new(DashMap::new()); // Thread-safe map of client addresses to usernames
-    let chat_history = Arc::new(RwLock::new(Vec::new())); // Shared chat history with RwLock
+    // Shared data
+    let clients: Arc<Mutex<HashMap<SocketAddr, TcpStream>>> = Arc::new(Mutex::new(HashMap::new()));
+    let usernames: Arc<Mutex<HashMap<SocketAddr, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let chat_history: Arc<Mutex<Vec<ChatMessage>>> = Arc::new(Mutex::new(Vec::new()));
 
-    // Accept incoming client connections
+    // Accept loop
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let clients = Arc::clone(&clients);
-                let usernames = Arc::clone(&usernames);
-                let chat_history = Arc::clone(&chat_history);
+                let peer_addr = match stream.peer_addr() {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        eprintln!("Could not get peer address: {}", e);
+                        continue;
+                    }
+                };
+                println!("New client connected: {:?}", peer_addr);
+
+                // Insert the new client into the map right away
+                {
+                    let mut lock = clients.lock().unwrap();
+                    lock.insert(peer_addr, stream.try_clone()?);
+                }
+
+                // Clone Arcs for the new thread
+                let clients_clone = Arc::clone(&clients);
+                let usernames_clone = Arc::clone(&usernames);
+                let history_clone = Arc::clone(&chat_history);
+
+                // Spawn a client handler
                 thread::spawn(move || {
-                    if let Err(e) = handle_client(stream, clients, usernames, chat_history) {
-                        eprintln!("Error in client thread: {:?}", e);
+                    if let Err(e) =
+                        handle_client(stream, clients_clone, usernames_clone, history_clone)
+                    {
+                        eprintln!("Error handling client {:?}: {:?}", peer_addr, e);
                     }
                 });
             }
-            Err(e) => println!("Failed to accept connection: {}", e),
+            Err(e) => {
+                eprintln!("Failed to accept connection: {}", e);
+            }
         }
     }
-
     Ok(())
 }

@@ -20,7 +20,6 @@ fn main() -> ChatResult<()> {
         .init();
 
     // Bind the server to a local address and port (127.0.0.1:8081).
-    // Wrap `TcpListener` in an `Arc` so it can be shared across threads.
     let listener = Arc::new(
         TcpListener::bind("127.0.0.1:8081")
             .map_err(|_| errors::ChatServerError::NoAvailablePorts)?, // Handle binding errors.
@@ -36,8 +35,8 @@ fn main() -> ChatResult<()> {
     let is_shutting_down = Arc::new(AtomicBool::new(false));
 
     // Handle Ctrl+C signal to gracefully shut down the server.
-    let clients_clone = Arc::clone(&clients); // Clone `clients` to use in the signal handler.
-    let is_shutting_down_clone = Arc::clone(&is_shutting_down); // Clone the shutdown flag.
+    let clients_clone = Arc::clone(&clients);
+    let is_shutting_down_clone = Arc::clone(&is_shutting_down);
     set_handler(move || {
         if is_shutting_down_clone.load(Ordering::SeqCst) {
             return; // Prevent multiple shutdown triggers.
@@ -45,13 +44,15 @@ fn main() -> ChatResult<()> {
         is_shutting_down_clone.store(true, Ordering::SeqCst); // Set the shutdown flag.
         log::info!("Shutting down server...");
 
-        let clients_lock = clients_clone.read().unwrap(); // Read lock to safely access `clients`.
+        // Close all client connections gracefully.
+        let clients_lock = clients_clone.read().unwrap();
         for (_, client) in clients_lock.iter() {
-            // Gracefully close each client connection.
             if let Err(e) = client.shutdown(Shutdown::Both) {
                 log::error!("Failed to shutdown client connection: {}", e);
             }
         }
+
+        log::info!("All clients have been disconnected. Exiting...");
         std::process::exit(0); // Terminate the process.
     })
     .expect("Error setting Ctrl+C handler");
@@ -63,25 +64,21 @@ fn main() -> ChatResult<()> {
             break;
         }
 
-        // Match the incoming connection result.
         match stream {
             Ok(stream) => {
                 // Clone shared structures for each new thread.
-                // Clone created a new reference to the same data, not a new copy.
                 let clients = Arc::clone(&clients);
                 let usernames = Arc::clone(&usernames);
                 let chat_history = Arc::clone(&chat_history);
 
                 // Spawn a new thread to handle the client.
                 thread::spawn(move || {
-                    // Handle the client connection and log any errors.
                     if let Err(e) = handle_client(stream, clients, usernames, chat_history) {
                         log::error!("Error handling client: {}", e);
                     }
                 });
             }
             Err(e) => {
-                // Log errors while accepting connections.
                 log::error!("Failed to accept connection: {}", e);
                 if is_shutting_down.load(Ordering::SeqCst) {
                     break; // Exit loop if shutdown is triggered.
@@ -90,7 +87,6 @@ fn main() -> ChatResult<()> {
         }
     }
 
-    // Log server shutdown after exiting the loop.
     log::info!("Server has shut down.");
     Ok(())
 }

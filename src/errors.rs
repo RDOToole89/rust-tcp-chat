@@ -15,6 +15,10 @@ pub enum ChatServerError {
     PoisonedLock,
     #[error("No available ports")]
     NoAvailablePorts,
+    #[error("Invalid message")]
+    InvalidMessage(String),
+    #[error("Missing username")]
+    MissingUsername(String),
 }
 
 pub type ChatResult<T> = Result<T, ChatServerError>;

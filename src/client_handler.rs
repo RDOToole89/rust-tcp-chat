@@ -1,16 +1,17 @@
+// client_handler.rs
 use crate::errors::{ChatResult, ChatServerError};
 use crate::message::{ChatMessage, ChatMessageType, CommandType};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 /// Handles communication with a single client.
 pub fn handle_client(
     mut stream: TcpStream,
-    clients: Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
-    usernames: Arc<Mutex<HashMap<SocketAddr, String>>>,
-    chat_history: Arc<Mutex<Vec<ChatMessage>>>,
+    clients: Arc<RwLock<HashMap<SocketAddr, TcpStream>>>,
+    usernames: Arc<RwLock<HashMap<SocketAddr, String>>>,
+    chat_history: Arc<RwLock<Vec<ChatMessage>>>,
 ) -> ChatResult<()> {
     let peer_addr = stream.peer_addr()?;
     println!("Handling client: {:?}", peer_addr);
@@ -39,11 +40,11 @@ pub fn handle_client(
 /// Registers the client in the shared `clients` map.
 fn register_client(
     stream: &TcpStream,
-    clients: &Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
-    _usernames: &Arc<Mutex<HashMap<SocketAddr, String>>>,
+    clients: &Arc<RwLock<HashMap<SocketAddr, TcpStream>>>,
+    _usernames: &Arc<RwLock<HashMap<SocketAddr, String>>>,
     peer_addr: SocketAddr,
 ) -> ChatResult<()> {
-    let mut clients_lock = clients.lock()?;
+    let mut clients_lock = clients.write()?;
     clients_lock.insert(peer_addr, stream.try_clone()?);
     Ok(())
 }
@@ -69,9 +70,9 @@ fn get_client_username(stream: &mut TcpStream, peer_addr: SocketAddr) -> ChatRes
 /// Sends the chat history to the client.
 fn send_chat_history(
     stream: &mut TcpStream,
-    chat_history: &Arc<Mutex<Vec<ChatMessage>>>,
+    chat_history: &Arc<RwLock<Vec<ChatMessage>>>,
 ) -> ChatResult<()> {
-    let history = chat_history.lock()?;
+    let history = chat_history.read()?;
     for msg in history.iter() {
         send_message_to_client(stream, msg)?;
     }
@@ -80,34 +81,51 @@ fn send_chat_history(
 
 /// Broadcasts a "join" message to all clients.
 fn broadcast_join_message(
-    clients: &Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
-    usernames: &Arc<Mutex<HashMap<SocketAddr, String>>>,
+    clients: &Arc<RwLock<HashMap<SocketAddr, TcpStream>>>,
+    usernames: &Arc<RwLock<HashMap<SocketAddr, String>>>,
     peer_addr: SocketAddr,
     username: &str,
-    chat_history: &Arc<Mutex<Vec<ChatMessage>>>,
+    chat_history: &Arc<RwLock<Vec<ChatMessage>>>,
 ) -> ChatResult<()> {
-    // Add the username to the usernames hashmap
     {
-        let mut usernames_lock = usernames.lock()?;
+        let mut usernames_lock = usernames.write()?;
         usernames_lock.insert(peer_addr, username.to_string());
     }
 
-    // Create and broadcast the join message
-    let join_msg = ChatMessage {
-        message_type: ChatMessageType::Join,
-        username: Some(username.to_string()),
-        content: format!("{} has joined the chat", username),
-    };
-    broadcast_message(clients, peer_addr, &join_msg, chat_history);
+    broadcast_system_message(
+        clients,
+        chat_history,
+        peer_addr,
+        username,
+        ChatMessageType::Join,
+        format!("{} has joined the chat", username),
+    )?;
     Ok(())
+}
+
+fn broadcast_system_message(
+    clients: &Arc<RwLock<HashMap<SocketAddr, TcpStream>>>,
+    chat_history: &Arc<RwLock<Vec<ChatMessage>>>,
+    sender: SocketAddr,
+    username: &str,
+    message_type: ChatMessageType,
+    content: String,
+) -> ChatResult<ChatMessage> {
+    let msg = ChatMessage {
+        message_type,
+        username: Some(username.to_string()),
+        content,
+    };
+    broadcast_message(clients, sender, &msg, chat_history);
+    Ok(msg)
 }
 
 /// Handles incoming messages from the client.
 fn handle_client_messages(
     stream: &mut TcpStream,
-    clients: &Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
-    usernames: &Arc<Mutex<HashMap<SocketAddr, String>>>,
-    chat_history: &Arc<Mutex<Vec<ChatMessage>>>,
+    clients: &Arc<RwLock<HashMap<SocketAddr, TcpStream>>>,
+    usernames: &Arc<RwLock<HashMap<SocketAddr, String>>>,
+    chat_history: &Arc<RwLock<Vec<ChatMessage>>>,
     peer_addr: SocketAddr,
     username: &str,
 ) -> ChatResult<()> {
@@ -140,9 +158,9 @@ fn handle_client_messages(
 /// Handles a parsed `ChatMessage` from the client.
 fn handle_parsed_message(
     stream: &mut TcpStream,
-    clients: &Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
-    usernames: &Arc<Mutex<HashMap<SocketAddr, String>>>,
-    chat_history: &Arc<Mutex<Vec<ChatMessage>>>,
+    clients: &Arc<RwLock<HashMap<SocketAddr, TcpStream>>>,
+    usernames: &Arc<RwLock<HashMap<SocketAddr, String>>>,
+    chat_history: &Arc<RwLock<Vec<ChatMessage>>>,
     peer_addr: SocketAddr,
     username: &str,
     chat_msg: ChatMessage,
@@ -180,11 +198,11 @@ fn handle_parsed_message(
 /// Sends the list of online users to the client.
 fn send_user_list(
     stream: &mut TcpStream,
-    usernames: &Arc<Mutex<HashMap<SocketAddr, String>>>,
+    usernames: &Arc<RwLock<HashMap<SocketAddr, String>>>,
 ) -> ChatResult<()> {
     let users = {
         // Acquire a lock on the usernames hashmap and collect all usernames
-        let usernames_lock = usernames.lock()?;
+        let usernames_lock = usernames.read()?;
         if usernames_lock.is_empty() {
             eprintln!("DEBUG: No users found in usernames map."); // Debugging log
         } else {
@@ -214,27 +232,29 @@ fn send_user_list(
 /// Handles client disconnects by broadcasting a "leave" message and cleaning up.
 fn handle_client_disconnect(
     stream: &mut TcpStream,
-    clients: &Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
-    usernames: &Arc<Mutex<HashMap<SocketAddr, String>>>,
+    clients: &Arc<RwLock<HashMap<SocketAddr, TcpStream>>>,
+    usernames: &Arc<RwLock<HashMap<SocketAddr, String>>>,
     peer_addr: SocketAddr,
     username: &str,
     message_type: &ChatMessageType,
-    chat_history: &Arc<Mutex<Vec<ChatMessage>>>,
+    chat_history: &Arc<RwLock<Vec<ChatMessage>>>,
 ) -> ChatResult<()> {
-    let leave_msg = ChatMessage {
-        message_type: message_type.clone(),
-        username: Some(username.to_string()),
-        content: format!("{} has left the chat", username),
-    };
-    broadcast_message(clients, peer_addr, &leave_msg, chat_history);
+    let leave_msg = broadcast_system_message(
+        clients,
+        chat_history,
+        peer_addr,
+        username,
+        message_type.clone(),
+        format!("{} has left the chat", username),
+    )?;
     send_message_to_client(stream, &leave_msg)?;
 
     // Remove the client from shared state
     {
-        let mut clients_lock = clients.lock()?;
+        let mut clients_lock = clients.write()?;
         clients_lock.remove(&peer_addr);
 
-        let mut usernames_lock = usernames.lock()?;
+        let mut usernames_lock = usernames.write()?;
         usernames_lock.remove(&peer_addr);
     }
 
@@ -243,13 +263,13 @@ fn handle_client_disconnect(
 
 /// Removes a client from the shared state after disconnection.
 fn cleanup_client(
-    clients: &Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
-    usernames: &Arc<Mutex<HashMap<SocketAddr, String>>>,
+    clients: &Arc<RwLock<HashMap<SocketAddr, TcpStream>>>,
+    usernames: &Arc<RwLock<HashMap<SocketAddr, String>>>,
     peer_addr: SocketAddr,
 ) {
-    clients.lock().ok().map(|mut lock| lock.remove(&peer_addr));
+    clients.write().ok().map(|mut lock| lock.remove(&peer_addr));
     usernames
-        .lock()
+        .write()
         .ok()
         .map(|mut lock| lock.remove(&peer_addr));
 }
@@ -260,27 +280,46 @@ fn send_message_to_client(stream: &mut TcpStream, message: &ChatMessage) -> Chat
     stream.write_all(format!("{}\n", serialized_msg).as_bytes())?;
     Ok(())
 }
-
 /// Broadcasts a message to all clients except the sender and updates the chat history.
 fn broadcast_message(
-    clients: &Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
+    clients: &Arc<RwLock<HashMap<SocketAddr, TcpStream>>>,
     sender: SocketAddr,
     message: &ChatMessage,
-    chat_history: &Arc<Mutex<Vec<ChatMessage>>>, // Add chat_history as a parameter
+    chat_history: &Arc<RwLock<Vec<ChatMessage>>>,
 ) {
     // Add the message to the chat history
     {
-        let mut history_lock = chat_history.lock().unwrap();
+        let mut history_lock = chat_history.write().unwrap();
         history_lock.push(message.clone());
     }
 
     let serialized = serde_json::to_string(message).unwrap_or_default();
-    let clients_lock = clients.lock().unwrap();
-    for (&addr, mut client) in clients_lock.iter() {
-        if addr != sender {
-            if let Err(e) = client.write_all(format!("{}\n", serialized).as_bytes()) {
-                eprintln!("Failed to write to {}: {}", addr, e);
+    let mut failed_clients = vec![];
+
+    // Use a read lock to access the clients
+    {
+        let clients_lock = clients.read().unwrap();
+        for (&addr, client) in clients_lock.iter() {
+            if addr != sender {
+                if let Ok(mut writable_client) = client.try_clone() {
+                    if let Err(_) =
+                        writable_client.write_all(format!("{}\n", serialized).as_bytes())
+                    {
+                        failed_clients.push(addr); // Collect failed clients
+                    }
+                } else {
+                    failed_clients.push(addr);
+                }
             }
+        }
+    }
+
+    // Clean up failed clients
+    if !failed_clients.is_empty() {
+        let mut clients_lock = clients.write().unwrap();
+        for addr in failed_clients {
+            eprintln!("Removing failed client: {}", addr);
+            clients_lock.remove(&addr);
         }
     }
 }

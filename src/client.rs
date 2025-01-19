@@ -1,3 +1,4 @@
+// client.rs
 mod message;
 use crate::message::{ChatMessage, ChatMessageType, CommandType};
 use std::env;
